@@ -1,0 +1,14 @@
+{
+  "users": [],
+  "notes": [],
+  "comments": [],
+  "likes": [],
+  "bookmarks": [],
+  "views": [],
+  "notifications": [],
+  "admin": {
+    "id": "admin123",
+    "email": "admin@mynotes.com",
+    "password": "$2a$10$N9qo8uLOickgx2ZMRZoMy.MrYV7Z6K7A9YFJvT7qL9L2z5JQ1FzqK"
+  }
+}

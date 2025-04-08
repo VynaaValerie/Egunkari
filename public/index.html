@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyNotes - Social Notes Platform</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Header -->
+    <header>
+        <div class="container">
+            <nav class="navbar">
+                <a href="#" class="logo" data-view="dashboard">
+                    <i class="fas fa-book"></i> MyNotes
+                </a>
+                <div class="nav-links" id="navLinks">
+                    <a href="#" data-view="dashboard"><i class="fas fa-home"></i> Beranda</a>
+                    <a href="#" data-view="explore"><i class="fas fa-compass"></i> Jelajahi</a>
+                    <a href="#" data-view="notifications" id="notificationsLink">
+                        <i class="fas fa-bell"></i> Notifikasi <span class="badge" id="notificationBadge">0</span>
+                    </a>
+                    <a href="#" data-view="bookmarks"><i class="fas fa-bookmark"></i> Disimpan</a>
+                </div>
+                <div class="header-controls">
+                    <div class="theme-toggle">
+                        <input type="checkbox" id="themeToggle">
+                        <label for="themeToggle" class="theme-toggle-label">
+                            <i class="fas fa-sun"></i>
+                            <i class="fas fa-moon"></i>
+                            <span class="theme-toggle-ball"></span>
+                        </label>
+                    </div>
+                    <div class="auth-buttons" id="authButtons">
+                        <button class="btn btn-outline" id="loginBtn">Masuk</button>
+                        <button class="btn" id="registerBtn">Daftar</button>
+                    </div>
+                    <div class="user-menu" id="userMenu" style="display: none;">
+                        <img src="" alt="User" class="user-avatar" id="userAvatar">
+                        <div class="dropdown-menu" id="dropdownMenu">
+                            <a href="#" data-view="profile"><i class="fas fa-user"></i> Profil</a>
+                            <a href="#" data-view="settings"><i class="fas fa-cog"></i> Pengaturan</a>
+                            <a href="#" id="logoutBtn"><i class="fas fa-sign-out-alt"></i> Keluar</a>
+                        </div>
+                    </div>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                </div>
+            </nav>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main>
+        <div class="container" id="appContent">
+            <!-- Content will be loaded here -->
+        </div>
+    </main>
+
+    <!-- Add Note Button -->
+    <button class="add-note-btn" id="addNoteBtn">
+        <i class="fas fa-plus"></i>
+    </button>
+
+    <!-- Auth Modals -->
+    <div class="modal" id="loginModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeLoginModal">&times;</button>
+            <div class="modal-body">
+                <h2>Masuk ke MyNotes</h2>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="loginEmail">Email</label>
+                        <input type="email" id="loginEmail" placeholder="Masukkan email Anda" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="loginPassword">Password</label>
+                        <input type="password" id="loginPassword" placeholder="Masukkan password Anda" required>
+                    </div>
+                    <button type="submit" class="btn">Masuk</button>
+                </form>
+                <div class="auth-footer">
+                    <p>Belum punya akun? <a href="#" id="showRegister">Daftar</a></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="registerModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeRegisterModal">&times;</button>
+            <div class="modal-body">
+                <h2>Buat Akun Baru</h2>
+                <form id="registerForm">
+                    <div class="form-group">
+                        <label for="registerName">Nama Lengkap</label>
+                        <input type="text" id="registerName" placeholder="Masukkan nama Anda" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="registerEmail">Email</label>
+                        <input type="email" id="registerEmail" placeholder="Masukkan email Anda" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="registerPassword">Password (minimal 6 karakter)</label>
+                        <input type="password" id="registerPassword" placeholder="Buat password" minlength="6" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="registerConfirmPassword">Konfirmasi Password</label>
+                        <input type="password" id="registerConfirmPassword" placeholder="Konfirmasi password Anda" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="registerBio">Bio (Opsional)</label>
+                        <textarea id="registerBio" rows="2" placeholder="Ceritakan tentang diri Anda"></textarea>
+                    </div>
+                    <button type="submit" class="btn">Daftar</button>
+                </form>
+                <div class="auth-footer">
+                    <p>Sudah punya akun? <a href="#" id="showLogin">Masuk</a></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Note Modal -->
+    <div class="modal" id="noteModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeNoteModal">&times;</button>
+            <div class="modal-body">
+                <h2 id="noteModalTitle">Buat Catatan Baru</h2>
+                <form id="noteForm" enctype="multipart/form-data">
+                    <input type="hidden" id="noteId">
+                    <div class="form-group">
+                        <label for="noteTitle">Judul</label>
+                        <input type="text" id="noteTitle" placeholder="Judul catatan" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="noteContent">Isi</label>
+                        <textarea id="noteContent" rows="5" placeholder="Tulis catatan Anda di sini..." required></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="noteImage">Gambar (Opsional)</label>
+                        <input type="file" id="noteImage" accept="image/*">
+                        <div id="noteImagePreview" class="image-preview"></div>
+                        <button type="button" class="btn btn-outline btn-sm" id="removeImageBtn" style="display: none;">
+                            <i class="fas fa-trash"></i> Hapus Gambar
+                        </button>
+                    </div>
+                    <div class="form-group form-checkbox">
+                        <input type="checkbox" id="noteIsPublic">
+                        <label for="noteIsPublic">Buat catatan ini publik</label>
+                    </div>
+                    <button type="submit" class="btn" id="saveNoteBtn">Simpan Catatan</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Note Detail Modal -->
+    <div class="modal" id="noteDetailModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeNoteDetailModal">&times;</button>
+            <div class="modal-body">
+                <div class="note-detail-header">
+                    <div class="note-author">
+                        <img src="" alt="Author" id="noteDetailAuthorAvatar" class="note-author-avatar">
+                        <div>
+                            <h3 id="noteDetailAuthorName"></h3>
+                            <small id="noteDetailCreatedAt"></small>
+                        </div>
+                        <button class="btn btn-outline btn-sm" id="followUserBtn" style="margin-left: auto;">
+                            <i class="fas fa-user-plus"></i> Ikuti
+                        </button>
+                    </div>
+                    <div class="note-stats">
+                        <span class="note-stat" id="noteDetailViews"><i class="fas fa-eye"></i> <span>0</span></span>
+                        <span class="note-stat" id="noteDetailLikes"><i class="fas fa-heart"></i> <span>0</span></span>
+                    </div>
+                </div>
+                <h2 id="noteDetailTitle"></h2>
+                <div class="note-image-container" id="noteDetailImageContainer"></div>
+                <div class="note-content" id="noteDetailContent"></div>
+                <div class="note-actions" id="noteDetailActions">
+                    <button class="btn btn-outline" id="noteDetailLikeBtn"><i class="far fa-heart"></i> Suka</button>
+                    <button class="btn btn-outline" id="noteDetailBookmarkBtn"><i class="far fa-bookmark"></i> Simpan</button>
+                    <button class="btn btn-outline" id="noteDetailShareBtn"><i class="fas fa-share"></i> Bagikan</button>
+                    <button class="btn btn-outline" id="noteDetailEditBtn" style="display: none;"><i class="fas fa-edit"></i> Edit</button>
+                    <button class="btn btn-outline" id="noteDetailDeleteBtn" style="display: none;"><i class="fas fa-trash"></i> Hapus</button>
+                </div>
+                <div class="comments-section">
+                    <h3>Komentar</h3>
+                    <form id="commentForm" enctype="multipart/form-data">
+                        <div class="form-group">
+                            <textarea id="commentContent" rows="2" placeholder="Tulis komentar Anda..." required></textarea>
+                            <div class="comment-attachments">
+                                <label for="commentAttachment" class="btn btn-outline btn-sm">
+                                    <i class="fas fa-image"></i> Gambar
+                                </label>
+                                <input type="file" id="commentAttachment" accept="image/*,audio/*" style="display: none;">
+                                <div id="commentAttachmentPreview" class="attachment-preview"></div>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn">Kirim Komentar</button>
+                    </form>
+                    <div class="comments-list" id="commentsList"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Share Modal -->
+    <div class="modal" id="shareModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeShareModal">&times;</button>
+            <div class="modal-body">
+                <h2>Bagikan Catatan</h2>
+                <div class="form-group">
+                    <label>Link untuk dibagikan:</label>
+                    <div class="share-link-container">
+                        <input type="text" id="shareLink" readonly>
+                        <button class="btn btn-outline" id="copyShareLinkBtn">
+                            <i class="fas fa-copy"></i> Salin
+                        </button>
+                    </div>
+                </div>
+                <div class="share-options">
+                    <button class="btn btn-outline share-option">
+                        <i class="fab fa-whatsapp"></i> WhatsApp
+                    </button>
+                    <button class="btn btn-outline share-option">
+                        <i class="fab fa-facebook"></i> Facebook
+                    </button>
+                    <button class="btn btn-outline share-option">
+                        <i class="fab fa-twitter"></i> Twitter
+                    </button>
+                    <button class="btn btn-outline share-option">
+                        <i class="fas fa-envelope"></i> Email
+                    </button>
+                </div>
+                <div class="form-group">
+                    <label>Bagikan ke pengguna lain:</label>
+                    <div class="user-search-container">
+                        <input type="text" id="shareUserSearch" placeholder="Cari pengguna...">
+                        <div class="user-search-results" id="shareUserResults"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Profile Modal -->
+    <div class="modal" id="profileModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeProfileModal">&times;</button>
+            <div class="modal-body">
+                <div class="profile-header">
+                    <img src="" alt="Profile" id="profileModalAvatar" class="profile-avatar">
+                    <div class="profile-info">
+                        <h2 id="profileModalName"></h2>
+                        <p id="profileModalBio"></p>
+                        <div class="profile-stats">
+                            <div class="stat-item">
+                                <div class="stat-value" id="profileModalNotes">0</div>
+                                <div class="stat-label">Catatan</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-value" id="profileModalFollowers">0</div>
+                                <div class="stat-label">Pengikut</div>
+                            </div>
+                            <div class="stat-item">
+                                <div class="stat-value" id="profileModalFollowing">0</div>
+                                <div class="stat-label">Mengikuti</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="profile-actions" id="profileModalActions">
+                    <button class="btn" id="profileModalFollowBtn">
+                        <i class="fas fa-user-plus"></i> Ikuti
+                    </button>
+                </div>
+                <div class="profile-public-notes">
+                    <h3>Catatan Publik</h3>
+                    <div class="notes-grid" id="profileModalNotesGrid"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Profile Modal -->
+    <div class="modal" id="editProfileModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeEditProfileModal">&times;</button>
+            <div class="modal-body">
+                <h2>Edit Profil</h2>
+                <form id="editProfileForm" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label for="editProfileName">Nama</label>
+                        <input type="text" id="editProfileName" placeholder="Masukkan nama Anda" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editProfileBio">Bio</label>
+                        <textarea id="editProfileBio" rows="3" placeholder="Ceritakan tentang diri Anda"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="editProfileAvatar">Foto Profil</label>
+                        <input type="file" id="editProfileAvatar" accept="image/*">
+                        <div class="image-preview" id="editProfileAvatarPreview"></div>
+                        <button type="button" class="btn btn-outline btn-sm" id="removeAvatarBtn">
+                            <i class="fas fa-trash"></i> Hapus Foto
+                        </button>
+                    </div>
+                    <button type="submit" class="btn">Simpan Perubahan</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notifications Modal -->
+    <div class="modal" id="notificationsModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeNotificationsModal">&times;</button>
+            <div class="modal-body">
+                <h2>Notifikasi</h2>
+                <div class="notifications-list" id="notificationsList"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Login Modal -->
+    <div class="modal" id="adminLoginModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeAdminLoginModal">&times;</button>
+            <div class="modal-body">
+                <h2>Admin Login</h2>
+                <form id="adminLoginForm">
+                    <div class="form-group">
+                        <label for="adminEmail">Email</label>
+                        <input type="email" id="adminEmail" placeholder="Masukkan email admin" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="adminPassword">Password</label>
+                        <input type="password" id="adminPassword" placeholder="Masukkan password admin" required>
+                    </div>
+                    <button type="submit" class="btn">Masuk</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Panel -->
+    <div class="modal" id="adminPanelModal">
+        <div class="modal-content">
+            <button class="close-modal" id="closeAdminPanelModal">&times;</button>
+            <div class="modal-body">
+                <h2>Admin Panel</h2>
+                <div class="admin-tabs">
+                    <div class="admin-tab active" data-tab="users">Pengguna</div>
+                    <div class="admin-tab" data-tab="notes">Catatan</div>
+                </div>
+                <div class="admin-content" id="adminUsersContent">
+                    <div class="admin-search">
+                        <input type="text" id="adminUserSearch" placeholder="Cari pengguna...">
+                    </div>
+                    <div class="admin-table-container">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Nama</th>
+                                    <th>Email</th>
+                                    <th>Bergabung</th>
+                                    <th>Catatan</th>
+                                    <th>Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminUsersTable">
+                                <!-- Users will be loaded here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="admin-content" id="adminNotesContent" style="display: none;">
+                    <div class="admin-search">
+                        <input type="text" id="adminNoteSearch" placeholder="Cari catatan...">
+                    </div>
+                    <div class="admin-table-container">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>Judul</th>
+                                    <th>Pembuat</th>
+                                    <th>Dibuat</th>
+                                    <th>Publik</th>
+                                    <th>Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminNotesTable">
+                                <!-- Notes will be loaded here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

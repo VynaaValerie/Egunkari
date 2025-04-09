@@ -15,10 +15,5 @@
       "src": "/(.*)",
       "dest": "public/index.html"
     }
-  ],
-  "env": {
-    "MONGODB_URI": "@mynotes-mongodb-uri",
-    "ADMIN_EMAIL": "@mynotes-admin-email",
-    "ADMIN_PASSWORD": "@mynotes-admin-password"
-  }
+  ]
 }

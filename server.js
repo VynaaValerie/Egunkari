@@ -1,31 +1,20 @@
-require('dotenv').config();
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
-const path = require('path');
+const admin = require('firebase-admin');
+const serviceAccount = require('./serviceAccountKey.json');
 
+// Initialize Firebase Admin
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://akses-pinaa-default-rtdb.firebaseio.com"
+});
+
+const db = admin.database();
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// MongoDB connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://vynaavalerie:hVwqPu9S4qaARnLc@cluster0.v5c9etv.mongodb.net/userDB', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-})
-.then(() => console.log('MongoDB connected!'))
-.catch(err => console.error('MongoDB connection error:', err));
-
-// Models
-const User = require('./models/User');
-const Note = require('./models/Note');
-const Comment = require('./models/Comment');
-const Like = require('./models/Like');
-const Bookmark = require('./models/Bookmark');
-const View = require('./models/View');
-const Notification = require('./models/Notification');
 
 // Rate limiting
 const limiter = rateLimit({
@@ -33,7 +22,7 @@ const limiter = rateLimit({
   max: 100 // limit each IP to 100 requests per windowMs
 });
 
-// Middleware
+// Apply to all requests
 app.use(limiter);
 app.use(cors());
 app.use(express.json());
@@ -54,12 +43,37 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
-// Helper function to create notification
+// Firebase Database Helper Functions
+async function getData(path) {
+  const snapshot = await db.ref(path).once('value');
+  return snapshot.val() || {};
+}
+
+async function setData(path, data) {
+  await db.ref(path).set(data);
+}
+
+async function pushData(path, data) {
+  const ref = db.ref(path).push();
+  await ref.set(data);
+  return ref.key;
+}
+
+async function updateData(path, updates) {
+  await db.ref(path).update(updates);
+}
+
+async function removeData(path) {
+  await db.ref(path).remove();
+}
+
+// Create notification
 async function createNotification(type, userId, relatedUserId, noteId = null, commentId = null) {
-  const user = await User.findById(userId);
-  const relatedUser = await User.findById(relatedUserId);
+  const user = await getData(`users/${userId}`);
+  if (!user) return;
   
-  if (!user || !relatedUser) return;
+  const relatedUser = await getData(`users/${relatedUserId}`);
+  if (!relatedUser) return;
   
   let message = '';
   
@@ -76,792 +90,738 @@ async function createNotification(type, userId, relatedUserId, noteId = null, co
     case 'follow':
       message = `${relatedUser.name} mulai mengikuti Anda`;
       break;
-    case 'share':
-      message = `${relatedUser.name} membagikan catatan kepada Anda`;
-      break;
   }
   
-  const notification = new Notification({
+  const newNotification = {
     userId,
     type,
     message,
     noteId,
     commentId,
-    relatedUserId,
-    isRead: false
-  });
+    isRead: false,
+    createdAt: new Date().toISOString()
+  };
   
-  await notification.save();
+  await pushData('notifications', newNotification);
 }
 
 // Admin middleware
 async function isAdmin(req, res, next) {
   const { email, password } = req.body;
+  const adminData = await getData('admin');
   
-  if (email === process.env.ADMIN_EMAIL && password === process.env.ADMIN_PASSWORD) {
+  if (email === adminData.email && bcrypt.compareSync(password, adminData.password)) {
     next();
   } else {
     res.status(403).json({ error: 'Unauthorized' });
   }
 }
 
-// API Endpoints
-
 // Track note views
 app.get('/api/notes/view/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const { userId } = req.query;
+  const { noteId } = req.params;
+  const { userId } = req.query;
+  
+  // Check if view already exists
+  const views = await getData(`views`);
+  const existingView = Object.values(views || {}).find(v => v.noteId === noteId && v.userId === userId);
+  
+  if (!existingView) {
+    const newView = {
+      noteId,
+      userId: userId || 'anonymous',
+      createdAt: new Date().toISOString()
+    };
     
-    // Check if view already exists
-    const existingView = await View.findOne({ 
-      noteId, 
-      userId: userId || 'anonymous' 
-    });
-    
-    if (!existingView) {
-      const view = new View({
-        noteId,
-        userId: userId || 'anonymous'
-      });
-      await view.save();
-      
-      // Increment view count in Note
-      await Note.findByIdAndUpdate(noteId, { $inc: { views: 1 } });
-    }
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error tracking view:', error);
-    res.status(500).json({ error: 'Server error' });
+    await pushData('views', newView);
   }
+  
+  res.json({ success: true });
 });
 
 // Get note view count
 app.get('/api/notes/views/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const count = await View.countDocuments({ noteId });
-    res.json({ count });
-  } catch (error) {
-    console.error('Error getting views:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const { noteId } = req.params;
+  const views = await getData('views');
+  const noteViews = Object.values(views || {}).filter(v => v.noteId === noteId);
+  res.json({ count: noteViews.length });
 });
 
 // Like/unlike a note
 app.post('/api/notes/like/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const { userId } = req.body;
+  const { noteId } = req.params;
+  const { userId } = req.body;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' });
+  }
+  
+  const likes = await getData('likes');
+  const existingLikeKey = Object.keys(likes || {}).find(key => 
+    likes[key].noteId === noteId && likes[key].userId === userId
+  );
+  
+  if (!existingLikeKey) {
+    // Add like
+    const newLike = {
+      noteId,
+      userId,
+      createdAt: new Date().toISOString()
+    };
     
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
+    await pushData('likes', newLike);
+    
+    // Create notification
+    const note = await getData(`notes/${noteId}`);
+    if (note && note.userId !== userId) {
+      await createNotification('like', note.userId, userId, noteId);
     }
     
-    const existingLike = await Like.findOne({ noteId, userId });
-    
-    if (!existingLike) {
-      // Add like
-      const like = new Like({ noteId, userId });
-      await like.save();
-      
-      // Increment like count in Note
-      await Note.findByIdAndUpdate(noteId, { $inc: { likes: 1 } });
-      
-      // Create notification
-      const note = await Note.findById(noteId);
-      if (note && note.userId.toString() !== userId) {
-        await createNotification('like', note.userId, userId, noteId);
-      }
-      
-      res.json({ liked: true });
-    } else {
-      // Remove like
-      await Like.findByIdAndDelete(existingLike._id);
-      
-      // Decrement like count in Note
-      await Note.findByIdAndUpdate(noteId, { $inc: { likes: -1 } });
-      
-      res.json({ liked: false });
-    }
-  } catch (error) {
-    console.error('Error liking note:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.json({ liked: true });
+  } else {
+    // Remove like
+    await removeData(`likes/${existingLikeKey}`);
+    res.json({ liked: false });
   }
 });
 
 // Check if user liked a note
 app.get('/api/notes/like/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const { userId } = req.query;
-    
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
-    }
-    
-    const liked = await Like.exists({ noteId, userId });
-    res.json({ liked: !!liked });
-  } catch (error) {
-    console.error('Error checking like:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { noteId } = req.params;
+  const { userId } = req.query;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' });
   }
+  
+  const likes = await getData('likes');
+  const liked = Object.values(likes || {}).some(l => l.noteId === noteId && l.userId === userId);
+  res.json({ liked });
 });
 
 // Get like count for a note
 app.get('/api/notes/likes/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const count = await Like.countDocuments({ noteId });
-    res.json({ count });
-  } catch (error) {
-    console.error('Error getting likes:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const { noteId } = req.params;
+  const likes = await getData('likes');
+  const noteLikes = Object.values(likes || {}).filter(l => l.noteId === noteId);
+  res.json({ count: noteLikes.length });
 });
 
 // Add comment
 app.post('/api/notes/comment/:noteId', upload.single('attachment'), async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const { userId, content, parentCommentId } = req.body;
-    const attachment = req.file;
-    
-    if (!userId || !content) {
-      return res.status(400).json({ error: 'userId and content are required' });
-    }
-    
-    const user = await User.findById(userId);
-    const note = await Note.findById(noteId);
-    
-    if (!user || !note) {
-      return res.status(404).json({ error: 'User or note not found' });
-    }
-    
-    const newComment = new Comment({
-      noteId,
-      userId,
-      content,
-      parentCommentId: parentCommentId || null,
-      attachment: attachment ? `/assets/${attachment.filename}` : null
-    });
-    
-    await newComment.save();
-    
-    // Increment comment count in Note
-    await Note.findByIdAndUpdate(noteId, { $inc: { comments: 1 } });
-    
-    // Create notification if not replying to self
-    if (note.userId.toString() !== userId && !parentCommentId) {
-      await createNotification('comment', note.userId, userId, noteId);
-    } else if (parentCommentId) {
-      const parentComment = await Comment.findById(parentCommentId);
-      if (parentComment && parentComment.userId.toString() !== userId) {
-        await createNotification('reply', parentComment.userId, userId, noteId, parentCommentId);
-      }
-    }
-    
-    res.status(201).json(newComment);
-  } catch (error) {
-    console.error('Error adding comment:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { noteId } = req.params;
+  const { userId, content, parentCommentId } = req.body;
+  const attachment = req.file;
+  
+  if (!userId || !content) {
+    return res.status(400).json({ error: 'userId and content are required' });
   }
+  
+  const user = await getData(`users/${userId}`);
+  const note = await getData(`notes/${noteId}`);
+  
+  if (!user || !note) {
+    return res.status(404).json({ error: 'User or note not found' });
+  }
+  
+  const newComment = {
+    noteId,
+    userId,
+    userName: user.name,
+    userAvatar: user.avatar,
+    content,
+    parentCommentId: parentCommentId || null,
+    attachment: attachment ? `/assets/${attachment.filename}` : null,
+    createdAt: new Date().toISOString()
+  };
+  
+  const commentId = await pushData('comments', newComment);
+  
+  // Create notification if not replying to self
+  if (note.userId !== userId && !parentCommentId) {
+    await createNotification('comment', note.userId, userId, noteId);
+  } else if (parentCommentId) {
+    const parentComment = await getData(`comments/${parentCommentId}`);
+    if (parentComment && parentComment.userId !== userId) {
+      await createNotification('reply', parentComment.userId, userId, noteId, commentId);
+    }
+  }
+  
+  res.status(201).json({ ...newComment, id: commentId });
 });
 
 // Get comments for a note
 app.get('/api/notes/comments/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
+  const { noteId } = req.params;
+  const comments = await getData('comments');
+  const noteComments = Object.entries(comments || {})
+    .map(([id, comment]) => ({ ...comment, id }))
+    .filter(c => c.noteId === noteId)
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  
+  // Build comment tree
+  const commentMap = {};
+  const roots = [];
+  
+  noteComments.forEach(comment => {
+    comment.replies = [];
+    commentMap[comment.id] = comment;
     
-    // Get all comments for this note
-    const comments = await Comment.find({ noteId })
-      .populate('userId', 'name avatar')
-      .sort({ createdAt: 1 });
-    
-    // Build comment tree
-    const commentMap = {};
-    const roots = [];
-    
-    comments.forEach(comment => {
-      comment.replies = [];
-      commentMap[comment._id] = comment;
-      
-      if (comment.parentCommentId) {
-        if (commentMap[comment.parentCommentId]) {
-          commentMap[comment.parentCommentId].replies.push(comment);
-        }
-      } else {
-        roots.push(comment);
+    if (comment.parentCommentId) {
+      if (commentMap[comment.parentCommentId]) {
+        commentMap[comment.parentCommentId].replies.push(comment);
       }
-    });
-    
-    res.json(roots);
-  } catch (error) {
-    console.error('Error getting comments:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    } else {
+      roots.push(comment);
+    }
+  });
+  
+  res.json(roots);
 });
 
 // Bookmark a note
 app.post('/api/notes/bookmark/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const { userId } = req.body;
+  const { noteId } = req.params;
+  const { userId } = req.body;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' });
+  }
+  
+  const bookmarks = await getData('bookmarks');
+  const existingBookmarkKey = Object.keys(bookmarks || {}).find(key => 
+    bookmarks[key].noteId === noteId && bookmarks[key].userId === userId
+  );
+  
+  if (!existingBookmarkKey) {
+    // Add bookmark
+    const newBookmark = {
+      noteId,
+      userId,
+      createdAt: new Date().toISOString()
+    };
     
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
-    }
-    
-    const existingBookmark = await Bookmark.findOne({ noteId, userId });
-    
-    if (!existingBookmark) {
-      // Add bookmark
-      const bookmark = new Bookmark({ noteId, userId });
-      await bookmark.save();
-      res.json({ bookmarked: true });
-    } else {
-      // Remove bookmark
-      await Bookmark.findByIdAndDelete(existingBookmark._id);
-      res.json({ bookmarked: false });
-    }
-  } catch (error) {
-    console.error('Error bookmarking note:', error);
-    res.status(500).json({ error: 'Server error' });
+    await pushData('bookmarks', newBookmark);
+    res.json({ bookmarked: true });
+  } else {
+    // Remove bookmark
+    await removeData(`bookmarks/${existingBookmarkKey}`);
+    res.json({ bookmarked: false });
   }
 });
 
 // Check if note is bookmarked by user
 app.get('/api/notes/bookmark/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const { userId } = req.query;
-    
-    if (!userId) {
-      return res.status(400).json({ error: 'userId is required' });
-    }
-    
-    const bookmarked = await Bookmark.exists({ noteId, userId });
-    res.json({ bookmarked: !!bookmarked });
-  } catch (error) {
-    console.error('Error checking bookmark:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { noteId } = req.params;
+  const { userId } = req.query;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' });
   }
+  
+  const bookmarks = await getData('bookmarks');
+  const bookmarked = Object.values(bookmarks || {}).some(b => b.noteId === noteId && b.userId === userId);
+  res.json({ bookmarked });
 });
 
 // Get user's bookmarks
 app.get('/api/bookmarks/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const bookmarks = await Bookmark.find({ userId })
-      .populate({
-        path: 'noteId',
-        populate: {
-          path: 'userId',
-          select: 'name avatar'
-        }
-      })
-      .sort({ createdAt: -1 });
-    
-    res.json(bookmarks.map(b => b.noteId).filter(note => note));
-  } catch (error) {
-    console.error('Error getting bookmarks:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const { userId } = req.params;
+  const bookmarks = await getData('bookmarks');
+  const userBookmarks = Object.values(bookmarks || {}).filter(b => b.userId === userId);
+  
+  // Get all bookmarked notes
+  const notes = await getData('notes');
+  const bookmarkNotes = userBookmarks
+    .map(b => notes[b.noteId])
+    .filter(note => note); // Filter out undefined if note was deleted
+  
+  res.json(bookmarkNotes);
 });
 
 // Follow/unfollow user
 app.post('/api/users/follow/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { followerId } = req.body;
+  const { userId } = req.params;
+  const { followerId } = req.body;
+  
+  if (!followerId) {
+    return res.status(400).json({ error: 'followerId is required' });
+  }
+  
+  if (userId === followerId) {
+    return res.status(400).json({ error: 'Cannot follow yourself' });
+  }
+  
+  const user = await getData(`users/${userId}`);
+  const follower = await getData(`users/${followerId}`);
+  
+  if (!user || !follower) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  
+  // Check if already following
+  const isFollowing = user.followers && user.followers.includes(followerId);
+  
+  if (isFollowing) {
+    // Unfollow
+    await updateData(`users/${userId}`, {
+      followers: user.followers.filter(id => id !== followerId)
+    });
     
-    if (!followerId) {
-      return res.status(400).json({ error: 'followerId is required' });
-    }
+    await updateData(`users/${followerId}`, {
+      following: follower.following.filter(id => id !== userId)
+    });
     
-    if (userId === followerId) {
-      return res.status(400).json({ error: 'Cannot follow yourself' });
-    }
+    res.json({ following: false });
+  } else {
+    // Follow
+    await updateData(`users/${userId}`, {
+      followers: [...(user.followers || []), followerId]
+    });
     
-    const user = await User.findById(userId);
-    const follower = await User.findById(followerId);
+    await updateData(`users/${followerId}`, {
+      following: [...(follower.following || []), userId]
+    });
     
-    if (!user || !follower) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    // Create notification
+    await createNotification('follow', userId, followerId);
     
-    const isFollowing = user.followers.includes(followerId);
-    
-    if (isFollowing) {
-      // Unfollow
-      await User.findByIdAndUpdate(userId, { $pull: { followers: followerId } });
-      await User.findByIdAndUpdate(followerId, { $pull: { following: userId } });
-      res.json({ following: false });
-    } else {
-      // Follow
-      await User.findByIdAndUpdate(userId, { $addToSet: { followers: followerId } });
-      await User.findByIdAndUpdate(followerId, { $addToSet: { following: userId } });
-      
-      // Create notification
-      await createNotification('follow', userId, followerId);
-      
-      res.json({ following: true });
-    }
-  } catch (error) {
-    console.error('Error following user:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.json({ following: true });
   }
 });
 
 // Check if user is following another user
 app.get('/api/users/is-following/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { followerId } = req.query;
-    
-    if (!followerId) {
-      return res.status(400).json({ error: 'followerId is required' });
-    }
-    
-    const user = await User.findById(userId);
-    
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    const isFollowing = user.followers.includes(followerId);
-    res.json({ isFollowing });
-  } catch (error) {
-    console.error('Error checking follow:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { userId } = req.params;
+  const { followerId } = req.query;
+  
+  if (!followerId) {
+    return res.status(400).json({ error: 'followerId is required' });
   }
+  
+  const user = await getData(`users/${userId}`);
+  
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  
+  const isFollowing = user.followers?.includes(followerId) || false;
+  res.json({ isFollowing });
 });
 
 // Get user notifications
 app.get('/api/notifications/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const notifications = await Notification.find({ userId })
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .populate('relatedUserId', 'name avatar')
-      .populate('noteId', 'title');
-    
-    res.json(notifications);
-  } catch (error) {
-    console.error('Error getting notifications:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const { userId } = req.params;
+  const notifications = await getData('notifications');
+  const userNotifications = Object.entries(notifications || {})
+    .map(([id, notification]) => ({ ...notification, id }))
+    .filter(n => n.userId === userId)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  
+  res.json(userNotifications);
 });
 
 // Mark notification as read
 app.put('/api/notifications/read/:notificationId', async (req, res) => {
-  try {
-    const { notificationId } = req.params;
-    
-    await Notification.findByIdAndUpdate(notificationId, { isRead: true });
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error marking notification:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const { notificationId } = req.params;
+  await updateData(`notifications/${notificationId}`, { isRead: true });
+  res.json({ success: true });
 });
 
 // Share note
 app.post('/api/notes/share/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    const { userId, sharedWithId } = req.body;
-    
-    if (!userId || !sharedWithId) {
-      return res.status(400).json({ error: 'userId and sharedWithId are required' });
-    }
-    
-    const note = await Note.findById(noteId);
-    const sharedWith = await User.findById(sharedWithId);
-    
-    if (!note || !sharedWith) {
-      return res.status(404).json({ error: 'Note or user not found' });
-    }
-    
-    // Create notification
-    await createNotification('share', sharedWithId, userId, noteId);
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error sharing note:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { noteId } = req.params;
+  const { userId, sharedWithId } = req.body;
+  
+  if (!userId || !sharedWithId) {
+    return res.status(400).json({ error: 'userId and sharedWithId are required' });
   }
+  
+  const note = await getData(`notes/${noteId}`);
+  const sharedWith = await getData(`users/${sharedWithId}`);
+  
+  if (!note || !sharedWith) {
+    return res.status(404).json({ error: 'Note or user not found' });
+  }
+  
+  // Create notification
+  await createNotification('share', sharedWithId, userId, noteId);
+  
+  res.json({ success: true });
 });
 
 // Get user stats
 app.get('/api/users/stats/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    const notesCount = await Note.countDocuments({ userId });
-    const publicNotesCount = await Note.countDocuments({ userId, isPublic: true });
-    const bookmarksCount = await Bookmark.countDocuments({ userId });
-    
-    // Calculate total views and likes
-    const notes = await Note.find({ userId });
-    const noteIds = notes.map(note => note._id);
-    
-    const totalViews = await View.countDocuments({ noteId: { $in: noteIds } });
-    const totalLikes = await Like.countDocuments({ noteId: { $in: noteIds } });
-    
-    const user = await User.findById(userId);
-    const followersCount = user.followers.length;
-    const followingCount = user.following.length;
-    
-    res.json({
-      totalNotes: notesCount,
-      totalPublicNotes: publicNotesCount,
-      totalBookmarks: bookmarksCount,
-      totalViews,
-      totalLikes,
-      followers: followersCount,
-      following: followingCount
-    });
-  } catch (error) {
-    console.error('Error getting user stats:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const { userId } = req.params;
+  
+  // Get all notes
+  const notes = await getData('notes');
+  const userNotes = Object.values(notes || {}).filter(n => n.userId === userId);
+  const publicNotes = userNotes.filter(n => n.isPublic);
+  
+  // Get bookmarks count
+  const bookmarks = await getData('bookmarks');
+  const userBookmarks = Object.values(bookmarks || {}).filter(b => b.userId === userId).length;
+  
+  // Calculate total views and likes
+  const views = await getData('views');
+  const likes = await getData('likes');
+  
+  let totalViews = 0;
+  let totalLikes = 0;
+  
+  userNotes.forEach(note => {
+    totalViews += Object.values(views || {}).filter(v => v.noteId === note.id).length;
+    totalLikes += Object.values(likes || {}).filter(l => l.noteId === note.id).length;
+  });
+  
+  // Get user data for followers/following count
+  const user = await getData(`users/${userId}`);
+  
+  res.json({
+    totalNotes: userNotes.length,
+    totalPublicNotes: publicNotes.length,
+    totalBookmarks: userBookmarks,
+    totalViews,
+    totalLikes,
+    followers: user?.followers?.length || 0,
+    following: user?.following?.length || 0
+  });
 });
 
 // Admin endpoints
 app.post('/api/admin/login', isAdmin, async (req, res) => {
+  const adminData = await getData('admin');
   res.json({ 
     success: true,
     admin: {
-      email: process.env.ADMIN_EMAIL
+      id: adminData.id,
+      email: adminData.email
     }
   });
 });
 
 app.get('/api/admin/users', async (req, res) => {
-  try {
-    const users = await User.find({}, 'name email createdAt isSuspended')
-      .sort({ createdAt: -1 });
-    
-    // Add notes count for each user
-    const usersWithStats = await Promise.all(users.map(async user => {
-      const notesCount = await Note.countDocuments({ userId: user._id });
-      return {
-        ...user.toObject(),
-        notesCount
-      };
-    }));
-    
-    res.json(usersWithStats);
-  } catch (error) {
-    console.error('Error getting admin users:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const users = await getData('users');
+  const notes = await getData('notes');
+  
+  const usersList = Object.entries(users || {}).map(([id, user]) => {
+    const userNotes = Object.values(notes || {}).filter(n => n.userId === id);
+    return {
+      id,
+      name: user.name,
+      email: user.email,
+      createdAt: user.createdAt,
+      isSuspended: user.isSuspended || false,
+      notesCount: userNotes.length
+    };
+  });
+  
+  res.json(usersList);
 });
 
 app.put('/api/admin/users/suspend/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { suspend } = req.body;
-    
-    const user = await User.findByIdAndUpdate(
-      userId, 
-      { isSuspended: suspend },
-      { new: true }
-    );
-    
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    res.json({ success: true, isSuspended: user.isSuspended });
-  } catch (error) {
-    console.error('Error suspending user:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { userId } = req.params;
+  const { suspend } = req.body;
+  
+  const user = await getData(`users/${userId}`);
+  
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
   }
+  
+  await updateData(`users/${userId}`, { isSuspended: suspend });
+  res.json({ success: true, isSuspended: suspend });
 });
 
 app.delete('/api/admin/notes/:noteId', async (req, res) => {
-  try {
-    const { noteId } = req.params;
-    
-    // Remove note and related data in transaction
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    
-    try {
-      await Note.findByIdAndDelete(noteId).session(session);
-      await Comment.deleteMany({ noteId }).session(session);
-      await Like.deleteMany({ noteId }).session(session);
-      await Bookmark.deleteMany({ noteId }).session(session);
-      await View.deleteMany({ noteId }).session(session);
-      
-      await session.commitTransaction();
-      res.json({ success: true });
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
-  } catch (error) {
-    console.error('Error deleting note:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const { noteId } = req.params;
+  
+  // Remove note
+  await removeData(`notes/${noteId}`);
+  
+  // Remove related data
+  const comments = await getData('comments');
+  const likes = await getData('likes');
+  const bookmarks = await getData('bookmarks');
+  const views = await getData('views');
+  
+  // Remove related comments
+  const commentKeys = Object.keys(comments || {}).filter(key => comments[key].noteId === noteId);
+  await Promise.all(commentKeys.map(key => removeData(`comments/${key}`)));
+  
+  // Remove related likes
+  const likeKeys = Object.keys(likes || {}).filter(key => likes[key].noteId === noteId);
+  await Promise.all(likeKeys.map(key => removeData(`likes/${key}`)));
+  
+  // Remove related bookmarks
+  const bookmarkKeys = Object.keys(bookmarks || {}).filter(key => bookmarks[key].noteId === noteId);
+  await Promise.all(bookmarkKeys.map(key => removeData(`bookmarks/${key}`)));
+  
+  // Remove related views
+  const viewKeys = Object.keys(views || {}).filter(key => views[key].noteId === noteId);
+  await Promise.all(viewKeys.map(key => removeData(`views/${key}`)));
+  
+  res.json({ success: true });
 });
 
-// Regular API endpoints
+// API Endpoints for users
 app.get('/api/users', async (req, res) => {
-  try {
-    const users = await User.find({}, 'name email avatar bio createdAt');
-    res.json(users);
-  } catch (error) {
-    console.error('Error getting users:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+  const users = await getData('users');
+  res.json(Object.values(users || {}));
 });
 
 app.get('/api/users/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const user = await User.findById(id, 'name email bio avatar createdAt isSuspended');
-    
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    res.json(user);
-  } catch (error) {
-    console.error('Error getting user:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { id } = req.params;
+  const user = await getData(`users/${id}`);
+  
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
   }
+  
+  res.json({
+    id,
+    name: user.name,
+    email: user.email,
+    bio: user.bio,
+    avatar: user.avatar,
+    createdAt: user.createdAt,
+    isSuspended: user.isSuspended || false
+  });
 });
 
+// API Endpoints for notes
 app.get('/api/notes/public', async (req, res) => {
-  try {
-    const publicNotes = await Note.find({ isPublic: true })
-      .populate('userId', 'name avatar')
-      .sort({ createdAt: -1 });
+  const notes = await getData('notes');
+  const users = await getData('users');
+  
+  const publicNotes = Object.entries(notes || {})
+    .map(([id, note]) => ({ ...note, id }))
+    .filter(note => note.isPublic && !users[note.userId]?.isSuspended);
+  
+  // Add stats to each note
+  const views = await getData('views');
+  const likes = await getData('likes');
+  const comments = await getData('comments');
+  
+  const notesWithStats = publicNotes.map(note => {
+    const noteViews = Object.values(views || {}).filter(v => v.noteId === note.id).length;
+    const noteLikes = Object.values(likes || {}).filter(l => l.noteId === note.id).length;
+    const noteComments = Object.values(comments || {}).filter(c => c.noteId === note.id).length;
     
-    res.json(publicNotes);
-  } catch (error) {
-    console.error('Error getting public notes:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    return {
+      ...note,
+      views: noteViews,
+      likes: noteLikes,
+      comments: noteComments
+    };
+  });
+  
+  res.json(notesWithStats);
 });
 
 app.get('/api/notes/user/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const userNotes = await Note.find({ userId })
-      .populate('userId', 'name avatar')
-      .sort({ createdAt: -1 });
+  const { userId } = req.params;
+  const notes = await getData('notes');
+  
+  const userNotes = Object.entries(notes || {})
+    .map(([id, note]) => ({ ...note, id }))
+    .filter(note => note.userId === userId);
+  
+  // Add stats to each note
+  const views = await getData('views');
+  const likes = await getData('likes');
+  const comments = await getData('comments');
+  
+  const notesWithStats = userNotes.map(note => {
+    const noteViews = Object.values(views || {}).filter(v => v.noteId === note.id).length;
+    const noteLikes = Object.values(likes || {}).filter(l => l.noteId === note.id).length;
+    const noteComments = Object.values(comments || {}).filter(c => c.noteId === note.id).length;
     
-    res.json(userNotes);
-  } catch (error) {
-    console.error('Error getting user notes:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+    return {
+      ...note,
+      views: noteViews,
+      likes: noteLikes,
+      comments: noteComments
+    };
+  });
+  
+  res.json(notesWithStats);
 });
 
 app.post('/api/notes', upload.single('image'), async (req, res) => {
-  try {
-    const { title, content, userId, isPublic } = req.body;
-    const image = req.file;
-    
-    if (!title || !content || !userId) {
-      return res.status(400).json({ error: 'Title, content, and userId are required' });
-    }
-
-    const newNote = new Note({
-      title,
-      content,
-      userId,
-      isPublic: !!isPublic,
-      image: image ? `/assets/${image.filename}` : null
-    });
-
-    await newNote.save();
-    res.status(201).json(newNote);
-  } catch (error) {
-    console.error('Error creating note:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { title, content, userId, isPublic } = req.body;
+  const image = req.file;
+  
+  if (!title || !content || !userId) {
+    return res.status(400).json({ error: 'Title, content, and userId are required' });
   }
+
+  const newNote = {
+    title,
+    content,
+    userId,
+    isPublic: !!isPublic,
+    image: image ? `/assets/${image.filename}` : null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const noteId = await pushData('notes', newNote);
+  res.status(201).json({ ...newNote, id: noteId });
 });
 
 app.put('/api/notes/:id', upload.single('image'), async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { title, content, isPublic, removeImage } = req.body;
-    const image = req.file;
+  const { id } = req.params;
+  const { title, content, isPublic, removeImage } = req.body;
+  const image = req.file;
 
-    const note = await Note.findById(id);
+  const note = await getData(`notes/${id}`);
 
-    if (!note) {
-      return res.status(404).json({ error: 'Note not found' });
-    }
-
-    if (title) note.title = title;
-    if (content) note.content = content;
-    if (isPublic !== undefined) note.isPublic = isPublic;
-    
-    if (image) {
-      note.image = `/assets/${image.filename}`;
-    } else if (removeImage === 'true') {
-      note.image = null;
-    }
-    
-    note.updatedAt = new Date();
-    await note.save();
-
-    res.json(note);
-  } catch (error) {
-    console.error('Error updating note:', error);
-    res.status(500).json({ error: 'Server error' });
+  if (!note) {
+    return res.status(404).json({ error: 'Note not found' });
   }
+
+  const updatedNote = {
+    ...note,
+    title: title || note.title,
+    content: content || note.content,
+    isPublic: isPublic !== undefined ? isPublic : note.isPublic,
+    image: image ? `/assets/${image.filename}` : 
+           removeImage === 'true' ? null : note.image,
+    updatedAt: new Date().toISOString()
+  };
+
+  await setData(`notes/${id}`, updatedNote);
+  res.json(updatedNote);
 });
 
 app.delete('/api/notes/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
+  const { id } = req.params;
 
-    // Remove note and related data in transaction
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    
-    try {
-      await Note.findByIdAndDelete(id).session(session);
-      await Comment.deleteMany({ noteId: id }).session(session);
-      await Like.deleteMany({ noteId: id }).session(session);
-      await Bookmark.deleteMany({ noteId: id }).session(session);
-      await View.deleteMany({ noteId: id }).session(session);
-      
-      await session.commitTransaction();
-      res.json({ message: 'Note deleted successfully' });
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
-  } catch (error) {
-    console.error('Error deleting note:', error);
-    res.status(500).json({ error: 'Server error' });
+  const note = await getData(`notes/${id}`);
+
+  if (!note) {
+    return res.status(404).json({ error: 'Note not found' });
   }
+
+  // Remove related data
+  const comments = await getData('comments');
+  const likes = await getData('likes');
+  const bookmarks = await getData('bookmarks');
+  const views = await getData('views');
+
+  // Remove related comments
+  const commentKeys = Object.keys(comments || {}).filter(key => comments[key].noteId === id);
+  await Promise.all(commentKeys.map(key => removeData(`comments/${key}`)));
+
+  // Remove related likes
+  const likeKeys = Object.keys(likes || {}).filter(key => likes[key].noteId === id);
+  await Promise.all(likeKeys.map(key => removeData(`likes/${key}`)));
+
+  // Remove related bookmarks
+  const bookmarkKeys = Object.keys(bookmarks || {}).filter(key => bookmarks[key].noteId === id);
+  await Promise.all(bookmarkKeys.map(key => removeData(`bookmarks/${key}`)));
+
+  // Remove related views
+  const viewKeys = Object.keys(views || {}).filter(key => views[key].noteId === id);
+  await Promise.all(viewKeys.map(key => removeData(`views/${key}`)));
+
+  // Finally remove the note
+  await removeData(`notes/${id}`);
+  res.json({ message: 'Note deleted successfully' });
 });
 
+// Auth endpoints
 app.post('/api/register', async (req, res) => {
-  try {
-    const { name, email, password, bio } = req.body;
-    
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: 'Name, email, and password are required' });
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ error: 'Invalid email format' });
-    }
-
-    // Check if email already exists
-    const emailExists = await User.exists({ email: email.toLowerCase() });
-    if (emailExists) {
-      return res.status(400).json({ error: 'Email already registered' });
-    }
-
-    const newUser = new User({
-      name,
-      email: email.toLowerCase(),
-      password,
-      bio: bio || '',
-      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=4a6fa5&color=fff`
-    });
-
-    await newUser.save();
-
-    // Don't return password hash
-    const userResponse = newUser.toObject();
-    delete userResponse.password;
-
-    res.status(201).json(userResponse);
-  } catch (error) {
-    console.error('Error registering user:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { name, email, password, bio } = req.body;
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: 'Name, email, and password are required' });
   }
+
+  // Validate email format
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
+
+  const users = await getData('users');
+  
+  // Check if email already exists (case insensitive)
+  const emailExists = Object.values(users || {}).some(u => u.email.toLowerCase() === email.toLowerCase());
+  if (emailExists) {
+    return res.status(400).json({ error: 'Email already registered' });
+  }
+
+  // Hash password
+  const hashedPassword = bcrypt.hashSync(password, 10);
+
+  const newUser = {
+    name,
+    email: email.toLowerCase(),
+    password: hashedPassword,
+    bio: bio || '',
+    avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=4a6fa5&color=fff`,
+    createdAt: new Date().toISOString(),
+    isSuspended: false,
+    followers: [],
+    following: []
+  };
+
+  const userId = await pushData('users', newUser);
+  
+  // Don't return password hash
+  const { password: _, ...userWithoutPassword } = newUser;
+  res.status(201).json({ ...userWithoutPassword, id: userId });
 });
 
 app.post('/api/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
-
-    const user = await User.findOne({ email: email.toLowerCase() });
-
-    if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-
-    if (user.isSuspended) {
-      return res.status(403).json({ error: 'Account suspended. Please contact admin.' });
-    }
-
-    // Don't return password hash
-    const userResponse = user.toObject();
-    delete userResponse.password;
-
-    res.json(userResponse);
-  } catch (error) {
-    console.error('Error logging in:', error);
-    res.status(500).json({ error: 'Server error' });
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
   }
+
+  const users = await getData('users');
+  const user = Object.values(users || {}).find(u => u.email.toLowerCase() === email.toLowerCase());
+
+  if (!user || !bcrypt.compareSync(password, user.password)) {
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
+
+  if (user.isSuspended) {
+    return res.status(403).json({ error: 'Account suspended. Please contact admin.' });
+  }
+
+  // Don't return password hash
+  const { password: _, ...userWithoutPassword } = user;
+  res.json({ ...userWithoutPassword, id: Object.keys(users).find(key => users[key].email === user.email) });
 });
 
 app.put('/api/users/:id', upload.single('avatar'), async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, bio, removeAvatar } = req.body;
-    const avatar = req.file;
+  const { id } = req.params;
+  const { name, bio, removeAvatar } = req.body;
+  const avatar = req.file;
 
-    const user = await User.findById(id);
+  const user = await getData(`users/${id}`);
 
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    if (name) user.name = name;
-    if (bio !== undefined) user.bio = bio;
-    
-    if (avatar) {
-      user.avatar = `/assets/${avatar.filename}`;
-    } else if (removeAvatar === 'true') {
-      user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name || user.name)}&background=4a6fa5&color=fff`;
-    }
-    
-    await user.save();
-
-    // Don't return password hash
-    const userResponse = user.toObject();
-    delete userResponse.password;
-
-    res.json(userResponse);
-  } catch (error) {
-    console.error('Error updating user:', error);
-    res.status(500).json({ error: 'Server error' });
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
   }
-});
 
-// Serve frontend
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  const updatedUser = {
+    ...user,
+    name: name || user.name,
+    bio: bio !== undefined ? bio : user.bio,
+    avatar: avatar ? `/assets/${avatar.filename}` : 
+           removeAvatar === 'true' ? `https://ui-avatars.com/api/?name=${encodeURIComponent(name || user.name)}&background=4a6fa5&color=fff` : 
+           user.avatar
+  };
+
+  await setData(`users/${id}`, updatedUser);
+
+  // Don't return password hash
+  const { password: _, ...userWithoutPassword } = updatedUser;
+  res.json({ ...userWithoutPassword, id });
 });
 
 // Run server

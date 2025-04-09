@@ -1,12 +1,31 @@
+require('dotenv').config();
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
+const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// MongoDB connection
+mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://vynaavalerie:hVwqPu9S4qaARnLc@cluster0.v5c9etv.mongodb.net/userDB', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log('MongoDB connected!'))
+.catch(err => console.error('MongoDB connection error:', err));
+
+// Models
+const User = require('./models/User');
+const Note = require('./models/Note');
+const Comment = require('./models/Comment');
+const Like = require('./models/Like');
+const Bookmark = require('./models/Bookmark');
+const View = require('./models/View');
+const Notification = require('./models/Notification');
 
 // Rate limiting
 const limiter = rateLimit({
@@ -14,7 +33,7 @@ const limiter = rateLimit({
   max: 100 // limit each IP to 100 requests per windowMs
 });
 
-// Apply to all requests
+// Middleware
 app.use(limiter);
 app.use(cors());
 app.use(express.json());
@@ -35,76 +54,14 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB
 });
 
-const databasePath = path.join(__dirname, 'public', 'database.json');
-
-// Initialize database if it doesn't exist
-if (!fs.existsSync(databasePath)) {
-  fs.writeFileSync(databasePath, JSON.stringify({ 
-    users: [], 
-    notes: [],
-    comments: [],
-    likes: [],
-    bookmarks: [],
-    views: [],
-    notifications: [],
-    admin: {
-      id: "admin123",
-      email: "admin@mynotes.com",
-      password: bcrypt.hashSync("admin123", 10)
-    }
-  }, null, 2));
-}
-
-// Helper function to read database
-function readDatabase() {
-  try {
-    const data = fs.readFileSync(databasePath, 'utf8').trim();
-    return data ? JSON.parse(data) : { 
-      users: [], 
-      notes: [],
-      comments: [],
-      likes: [],
-      bookmarks: [],
-      views: [],
-      notifications: [],
-      admin: {
-        id: "admin123",
-        email: "admin@mynotes.com",
-        password: bcrypt.hashSync("admin123", 10)
-      }
-    };
-  } catch (err) {
-    console.error('Failed to read database:', err.message);
-    return { 
-      users: [], 
-      notes: [],
-      comments: [],
-      likes: [],
-      bookmarks: [],
-      views: [],
-      notifications: [],
-      admin: {
-        id: "admin123",
-        email: "admin@mynotes.com",
-        password: bcrypt.hashSync("admin123", 10)
-      }
-    };
-  }
-}
-
-// Helper function to write to database
-function writeDatabase(data) {
-  fs.writeFileSync(databasePath, JSON.stringify(data, null, 2));
-}
-
-// Create notification
-function createNotification(type, userId, relatedUserId, noteId = null, commentId = null) {
-  const db = readDatabase();
-  const user = db.users.find(u => u.id === userId);
-  if (!user) return;
+// Helper function to create notification
+async function createNotification(type, userId, relatedUserId, noteId = null, commentId = null) {
+  const user = await User.findById(userId);
+  const relatedUser = await User.findById(relatedUserId);
+  
+  if (!user || !relatedUser) return;
   
   let message = '';
-  const relatedUser = db.users.find(u => u.id === relatedUserId);
   
   switch(type) {
     case 'like':
@@ -119,696 +76,792 @@ function createNotification(type, userId, relatedUserId, noteId = null, commentI
     case 'follow':
       message = `${relatedUser.name} mulai mengikuti Anda`;
       break;
+    case 'share':
+      message = `${relatedUser.name} membagikan catatan kepada Anda`;
+      break;
   }
   
-  db.notifications.push({
-    id: Date.now().toString(),
+  const notification = new Notification({
     userId,
     type,
     message,
     noteId,
     commentId,
-    isRead: false,
-    createdAt: new Date().toISOString()
+    relatedUserId,
+    isRead: false
   });
   
-  writeDatabase(db);
+  await notification.save();
 }
 
 // Admin middleware
-function isAdmin(req, res, next) {
+async function isAdmin(req, res, next) {
   const { email, password } = req.body;
-  const db = readDatabase();
   
-  if (email === db.admin.email && bcrypt.compareSync(password, db.admin.password)) {
+  if (email === process.env.ADMIN_EMAIL && password === process.env.ADMIN_PASSWORD) {
     next();
   } else {
     res.status(403).json({ error: 'Unauthorized' });
   }
 }
 
+// API Endpoints
+
 // Track note views
-app.get('/api/notes/view/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const { userId } = req.query;
-  const db = readDatabase();
-  
-  // Check if view already exists
-  const existingView = db.views.find(v => v.noteId === noteId && v.userId === userId);
-  
-  if (!existingView) {
-    db.views.push({
-      id: Date.now().toString(),
-      noteId,
-      userId: userId || 'anonymous',
-      createdAt: new Date().toISOString()
+app.get('/api/notes/view/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { userId } = req.query;
+    
+    // Check if view already exists
+    const existingView = await View.findOne({ 
+      noteId, 
+      userId: userId || 'anonymous' 
     });
-    writeDatabase(db);
+    
+    if (!existingView) {
+      const view = new View({
+        noteId,
+        userId: userId || 'anonymous'
+      });
+      await view.save();
+      
+      // Increment view count in Note
+      await Note.findByIdAndUpdate(noteId, { $inc: { views: 1 } });
+    }
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error tracking view:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  res.json({ success: true });
 });
 
 // Get note view count
-app.get('/api/notes/views/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const db = readDatabase();
-  const views = db.views.filter(v => v.noteId === noteId);
-  res.json({ count: views.length });
+app.get('/api/notes/views/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const count = await View.countDocuments({ noteId });
+    res.json({ count });
+  } catch (error) {
+    console.error('Error getting views:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // Like/unlike a note
-app.post('/api/notes/like/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const { userId } = req.body;
-  
-  if (!userId) {
-    return res.status(400).json({ error: 'userId is required' });
-  }
-  
-  const db = readDatabase();
-  const existingLikeIndex = db.likes.findIndex(l => l.noteId === noteId && l.userId === userId);
-  
-  if (existingLikeIndex === -1) {
-    // Add like
-    db.likes.push({
-      id: Date.now().toString(),
-      noteId,
-      userId,
-      createdAt: new Date().toISOString()
-    });
+app.post('/api/notes/like/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { userId } = req.body;
     
-    // Create notification
-    const note = db.notes.find(n => n.id === noteId);
-    if (note && note.userId !== userId) {
-      createNotification('like', note.userId, userId, noteId);
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
     }
     
-    writeDatabase(db);
-    res.json({ liked: true });
-  } else {
-    // Remove like
-    db.likes.splice(existingLikeIndex, 1);
-    writeDatabase(db);
-    res.json({ liked: false });
+    const existingLike = await Like.findOne({ noteId, userId });
+    
+    if (!existingLike) {
+      // Add like
+      const like = new Like({ noteId, userId });
+      await like.save();
+      
+      // Increment like count in Note
+      await Note.findByIdAndUpdate(noteId, { $inc: { likes: 1 } });
+      
+      // Create notification
+      const note = await Note.findById(noteId);
+      if (note && note.userId.toString() !== userId) {
+        await createNotification('like', note.userId, userId, noteId);
+      }
+      
+      res.json({ liked: true });
+    } else {
+      // Remove like
+      await Like.findByIdAndDelete(existingLike._id);
+      
+      // Decrement like count in Note
+      await Note.findByIdAndUpdate(noteId, { $inc: { likes: -1 } });
+      
+      res.json({ liked: false });
+    }
+  } catch (error) {
+    console.error('Error liking note:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
 // Check if user liked a note
-app.get('/api/notes/like/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const { userId } = req.query;
-  
-  if (!userId) {
-    return res.status(400).json({ error: 'userId is required' });
+app.get('/api/notes/like/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    const liked = await Like.exists({ noteId, userId });
+    res.json({ liked: !!liked });
+  } catch (error) {
+    console.error('Error checking like:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  const db = readDatabase();
-  const liked = db.likes.some(l => l.noteId === noteId && l.userId === userId);
-  res.json({ liked });
 });
 
 // Get like count for a note
-app.get('/api/notes/likes/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const db = readDatabase();
-  const likes = db.likes.filter(l => l.noteId === noteId);
-  res.json({ count: likes.length });
+app.get('/api/notes/likes/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const count = await Like.countDocuments({ noteId });
+    res.json({ count });
+  } catch (error) {
+    console.error('Error getting likes:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // Add comment
-app.post('/api/notes/comment/:noteId', upload.single('attachment'), (req, res) => {
-  const { noteId } = req.params;
-  const { userId, content, parentCommentId } = req.body;
-  const attachment = req.file;
-  
-  if (!userId || !content) {
-    return res.status(400).json({ error: 'userId and content are required' });
-  }
-  
-  const db = readDatabase();
-  const user = db.users.find(u => u.id === userId);
-  const note = db.notes.find(n => n.id === noteId);
-  
-  if (!user || !note) {
-    return res.status(404).json({ error: 'User or note not found' });
-  }
-  
-  const newComment = {
-    id: Date.now().toString(),
-    noteId,
-    userId,
-    userName: user.name,
-    userAvatar: user.avatar,
-    content,
-    parentCommentId: parentCommentId || null,
-    attachment: attachment ? `/assets/${attachment.filename}` : null,
-    createdAt: new Date().toISOString()
-  };
-  
-  db.comments.push(newComment);
-  
-  // Create notification if not replying to self
-  if (note.userId !== userId && !parentCommentId) {
-    createNotification('comment', note.userId, userId, noteId);
-  } else if (parentCommentId) {
-    const parentComment = db.comments.find(c => c.id === parentCommentId);
-    if (parentComment && parentComment.userId !== userId) {
-      createNotification('reply', parentComment.userId, userId, noteId, parentCommentId);
+app.post('/api/notes/comment/:noteId', upload.single('attachment'), async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { userId, content, parentCommentId } = req.body;
+    const attachment = req.file;
+    
+    if (!userId || !content) {
+      return res.status(400).json({ error: 'userId and content are required' });
     }
+    
+    const user = await User.findById(userId);
+    const note = await Note.findById(noteId);
+    
+    if (!user || !note) {
+      return res.status(404).json({ error: 'User or note not found' });
+    }
+    
+    const newComment = new Comment({
+      noteId,
+      userId,
+      content,
+      parentCommentId: parentCommentId || null,
+      attachment: attachment ? `/assets/${attachment.filename}` : null
+    });
+    
+    await newComment.save();
+    
+    // Increment comment count in Note
+    await Note.findByIdAndUpdate(noteId, { $inc: { comments: 1 } });
+    
+    // Create notification if not replying to self
+    if (note.userId.toString() !== userId && !parentCommentId) {
+      await createNotification('comment', note.userId, userId, noteId);
+    } else if (parentCommentId) {
+      const parentComment = await Comment.findById(parentCommentId);
+      if (parentComment && parentComment.userId.toString() !== userId) {
+        await createNotification('reply', parentComment.userId, userId, noteId, parentCommentId);
+      }
+    }
+    
+    res.status(201).json(newComment);
+  } catch (error) {
+    console.error('Error adding comment:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  writeDatabase(db);
-  res.status(201).json(newComment);
 });
 
 // Get comments for a note
-app.get('/api/notes/comments/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const db = readDatabase();
-  const comments = db.comments
-    .filter(c => c.noteId === noteId)
-    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-  
-  // Build comment tree
-  const commentMap = {};
-  const roots = [];
-  
-  comments.forEach(comment => {
-    comment.replies = [];
-    commentMap[comment.id] = comment;
+app.get('/api/notes/comments/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
     
-    if (comment.parentCommentId) {
-      if (commentMap[comment.parentCommentId]) {
-        commentMap[comment.parentCommentId].replies.push(comment);
+    // Get all comments for this note
+    const comments = await Comment.find({ noteId })
+      .populate('userId', 'name avatar')
+      .sort({ createdAt: 1 });
+    
+    // Build comment tree
+    const commentMap = {};
+    const roots = [];
+    
+    comments.forEach(comment => {
+      comment.replies = [];
+      commentMap[comment._id] = comment;
+      
+      if (comment.parentCommentId) {
+        if (commentMap[comment.parentCommentId]) {
+          commentMap[comment.parentCommentId].replies.push(comment);
+        }
+      } else {
+        roots.push(comment);
       }
-    } else {
-      roots.push(comment);
-    }
-  });
-  
-  res.json(roots);
+    });
+    
+    res.json(roots);
+  } catch (error) {
+    console.error('Error getting comments:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // Bookmark a note
-app.post('/api/notes/bookmark/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const { userId } = req.body;
-  
-  if (!userId) {
-    return res.status(400).json({ error: 'userId is required' });
-  }
-  
-  const db = readDatabase();
-  const existingBookmarkIndex = db.bookmarks.findIndex(b => b.noteId === noteId && b.userId === userId);
-  
-  if (existingBookmarkIndex === -1) {
-    // Add bookmark
-    db.bookmarks.push({
-      id: Date.now().toString(),
-      noteId,
-      userId,
-      createdAt: new Date().toISOString()
-    });
-    writeDatabase(db);
-    res.json({ bookmarked: true });
-  } else {
-    // Remove bookmark
-    db.bookmarks.splice(existingBookmarkIndex, 1);
-    writeDatabase(db);
-    res.json({ bookmarked: false });
+app.post('/api/notes/bookmark/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    const existingBookmark = await Bookmark.findOne({ noteId, userId });
+    
+    if (!existingBookmark) {
+      // Add bookmark
+      const bookmark = new Bookmark({ noteId, userId });
+      await bookmark.save();
+      res.json({ bookmarked: true });
+    } else {
+      // Remove bookmark
+      await Bookmark.findByIdAndDelete(existingBookmark._id);
+      res.json({ bookmarked: false });
+    }
+  } catch (error) {
+    console.error('Error bookmarking note:', error);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
 // Check if note is bookmarked by user
-app.get('/api/notes/bookmark/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const { userId } = req.query;
-  
-  if (!userId) {
-    return res.status(400).json({ error: 'userId is required' });
+app.get('/api/notes/bookmark/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    const bookmarked = await Bookmark.exists({ noteId, userId });
+    res.json({ bookmarked: !!bookmarked });
+  } catch (error) {
+    console.error('Error checking bookmark:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  const db = readDatabase();
-  const bookmarked = db.bookmarks.some(b => b.noteId === noteId && b.userId === userId);
-  res.json({ bookmarked });
 });
 
 // Get user's bookmarks
-app.get('/api/bookmarks/:userId', (req, res) => {
-  const { userId } = req.params;
-  const db = readDatabase();
-  
-  const bookmarkNotes = db.bookmarks
-    .filter(b => b.userId === userId)
-    .map(b => db.notes.find(n => n.id === b.noteId))
-    .filter(note => note); // Filter out undefined if note was deleted
-  
-  res.json(bookmarkNotes);
+app.get('/api/bookmarks/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const bookmarks = await Bookmark.find({ userId })
+      .populate({
+        path: 'noteId',
+        populate: {
+          path: 'userId',
+          select: 'name avatar'
+        }
+      })
+      .sort({ createdAt: -1 });
+    
+    res.json(bookmarks.map(b => b.noteId).filter(note => note));
+  } catch (error) {
+    console.error('Error getting bookmarks:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // Follow/unfollow user
-app.post('/api/users/follow/:userId', (req, res) => {
-  const { userId } = req.params;
-  const { followerId } = req.body;
-  
-  if (!followerId) {
-    return res.status(400).json({ error: 'followerId is required' });
-  }
-  
-  if (userId === followerId) {
-    return res.status(400).json({ error: 'Cannot follow yourself' });
-  }
-  
-  const db = readDatabase();
-  const user = db.users.find(u => u.id === userId);
-  const follower = db.users.find(u => u.id === followerId);
-  
-  if (!user || !follower) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-  
-  // Initialize followers array if not exists
-  if (!user.followers) user.followers = [];
-  if (!follower.following) follower.following = [];
-  
-  const isFollowing = user.followers.includes(followerId);
-  
-  if (isFollowing) {
-    // Unfollow
-    user.followers = user.followers.filter(id => id !== followerId);
-    follower.following = follower.following.filter(id => id !== userId);
-  } else {
-    // Follow
-    user.followers.push(followerId);
-    follower.following.push(userId);
+app.post('/api/users/follow/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { followerId } = req.body;
     
-    // Create notification
-    createNotification('follow', userId, followerId);
+    if (!followerId) {
+      return res.status(400).json({ error: 'followerId is required' });
+    }
+    
+    if (userId === followerId) {
+      return res.status(400).json({ error: 'Cannot follow yourself' });
+    }
+    
+    const user = await User.findById(userId);
+    const follower = await User.findById(followerId);
+    
+    if (!user || !follower) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const isFollowing = user.followers.includes(followerId);
+    
+    if (isFollowing) {
+      // Unfollow
+      await User.findByIdAndUpdate(userId, { $pull: { followers: followerId } });
+      await User.findByIdAndUpdate(followerId, { $pull: { following: userId } });
+      res.json({ following: false });
+    } else {
+      // Follow
+      await User.findByIdAndUpdate(userId, { $addToSet: { followers: followerId } });
+      await User.findByIdAndUpdate(followerId, { $addToSet: { following: userId } });
+      
+      // Create notification
+      await createNotification('follow', userId, followerId);
+      
+      res.json({ following: true });
+    }
+  } catch (error) {
+    console.error('Error following user:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  writeDatabase(db);
-  res.json({ following: !isFollowing });
 });
 
 // Check if user is following another user
-app.get('/api/users/is-following/:userId', (req, res) => {
-  const { userId } = req.params;
-  const { followerId } = req.query;
-  
-  if (!followerId) {
-    return res.status(400).json({ error: 'followerId is required' });
+app.get('/api/users/is-following/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { followerId } = req.query;
+    
+    if (!followerId) {
+      return res.status(400).json({ error: 'followerId is required' });
+    }
+    
+    const user = await User.findById(userId);
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const isFollowing = user.followers.includes(followerId);
+    res.json({ isFollowing });
+  } catch (error) {
+    console.error('Error checking follow:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  const db = readDatabase();
-  const user = db.users.find(u => u.id === userId);
-  
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-  
-  const isFollowing = user.followers?.includes(followerId) || false;
-  res.json({ isFollowing });
 });
 
 // Get user notifications
-app.get('/api/notifications/:userId', (req, res) => {
-  const { userId } = req.params;
-  const db = readDatabase();
-  
-  const notifications = db.notifications
-    .filter(n => n.userId === userId)
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  
-  res.json(notifications);
+app.get('/api/notifications/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const notifications = await Notification.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .populate('relatedUserId', 'name avatar')
+      .populate('noteId', 'title');
+    
+    res.json(notifications);
+  } catch (error) {
+    console.error('Error getting notifications:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // Mark notification as read
-app.put('/api/notifications/read/:notificationId', (req, res) => {
-  const { notificationId } = req.params;
-  const db = readDatabase();
-  
-  const notification = db.notifications.find(n => n.id === notificationId);
-  if (notification) {
-    notification.isRead = true;
-    writeDatabase(db);
+app.put('/api/notifications/read/:notificationId', async (req, res) => {
+  try {
+    const { notificationId } = req.params;
+    
+    await Notification.findByIdAndUpdate(notificationId, { isRead: true });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error marking notification:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  res.json({ success: true });
 });
 
 // Share note
-app.post('/api/notes/share/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const { userId, sharedWithId } = req.body;
-  
-  if (!userId || !sharedWithId) {
-    return res.status(400).json({ error: 'userId and sharedWithId are required' });
+app.post('/api/notes/share/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    const { userId, sharedWithId } = req.body;
+    
+    if (!userId || !sharedWithId) {
+      return res.status(400).json({ error: 'userId and sharedWithId are required' });
+    }
+    
+    const note = await Note.findById(noteId);
+    const sharedWith = await User.findById(sharedWithId);
+    
+    if (!note || !sharedWith) {
+      return res.status(404).json({ error: 'Note or user not found' });
+    }
+    
+    // Create notification
+    await createNotification('share', sharedWithId, userId, noteId);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error sharing note:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-  
-  const db = readDatabase();
-  const note = db.notes.find(n => n.id === noteId);
-  const sharedWith = db.users.find(u => u.id === sharedWithId);
-  
-  if (!note || !sharedWith) {
-    return res.status(404).json({ error: 'Note or user not found' });
-  }
-  
-  // Create notification
-  createNotification('share', sharedWithId, userId, noteId);
-  
-  res.json({ success: true });
 });
 
 // Get user stats
-app.get('/api/users/stats/:userId', (req, res) => {
-  const { userId } = req.params;
-  const db = readDatabase();
-  
-  const notes = db.notes.filter(n => n.userId === userId);
-  const publicNotes = notes.filter(n => n.isPublic);
-  const bookmarks = db.bookmarks.filter(b => b.userId === userId).length;
-  
-  // Calculate total views and likes
-  let totalViews = 0;
-  let totalLikes = 0;
-  
-  notes.forEach(note => {
-    totalViews += db.views.filter(v => v.noteId === note.id).length;
-    totalLikes += db.likes.filter(l => l.noteId === note.id).length;
-  });
-  
-  res.json({
-    totalNotes: notes.length,
-    totalPublicNotes: publicNotes.length,
-    totalBookmarks: bookmarks,
-    totalViews,
-    totalLikes,
-    followers: db.users.find(u => u.id === userId)?.followers?.length || 0,
-    following: db.users.find(u => u.id === userId)?.following?.length || 0
-  });
+app.get('/api/users/stats/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const notesCount = await Note.countDocuments({ userId });
+    const publicNotesCount = await Note.countDocuments({ userId, isPublic: true });
+    const bookmarksCount = await Bookmark.countDocuments({ userId });
+    
+    // Calculate total views and likes
+    const notes = await Note.find({ userId });
+    const noteIds = notes.map(note => note._id);
+    
+    const totalViews = await View.countDocuments({ noteId: { $in: noteIds } });
+    const totalLikes = await Like.countDocuments({ noteId: { $in: noteIds } });
+    
+    const user = await User.findById(userId);
+    const followersCount = user.followers.length;
+    const followingCount = user.following.length;
+    
+    res.json({
+      totalNotes: notesCount,
+      totalPublicNotes: publicNotesCount,
+      totalBookmarks: bookmarksCount,
+      totalViews,
+      totalLikes,
+      followers: followersCount,
+      following: followingCount
+    });
+  } catch (error) {
+    console.error('Error getting user stats:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // Admin endpoints
-app.post('/api/admin/login', isAdmin, (req, res) => {
-  const db = readDatabase();
+app.post('/api/admin/login', isAdmin, async (req, res) => {
   res.json({ 
     success: true,
     admin: {
-      id: db.admin.id,
-      email: db.admin.email
+      email: process.env.ADMIN_EMAIL
     }
   });
 });
 
-app.get('/api/admin/users', (req, res) => {
-  const db = readDatabase();
-  res.json(db.users.map(user => ({
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    createdAt: user.createdAt,
-    isSuspended: user.isSuspended || false,
-    notesCount: db.notes.filter(n => n.userId === user.id).length
-  })));
-});
-
-app.put('/api/admin/users/suspend/:userId', (req, res) => {
-  const { userId } = req.params;
-  const { suspend } = req.body;
-  
-  const db = readDatabase();
-  const userIndex = db.users.findIndex(u => u.id === userId);
-  
-  if (userIndex === -1) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-  
-  db.users[userIndex].isSuspended = suspend;
-  writeDatabase(db);
-  
-  res.json({ success: true, isSuspended: suspend });
-});
-
-app.delete('/api/admin/notes/:noteId', (req, res) => {
-  const { noteId } = req.params;
-  const db = readDatabase();
-  
-  // Remove note
-  const noteIndex = db.notes.findIndex(n => n.id === noteId);
-  if (noteIndex === -1) {
-    return res.status(404).json({ error: 'Note not found' });
-  }
-  
-  db.notes.splice(noteIndex, 1);
-  
-  // Remove related data
-  db.comments = db.comments.filter(c => c.noteId !== noteId);
-  db.likes = db.likes.filter(l => l.noteId !== noteId);
-  db.bookmarks = db.bookmarks.filter(b => b.noteId !== noteId);
-  db.views = db.views.filter(v => v.noteId !== noteId);
-  
-  writeDatabase(db);
-  res.json({ success: true });
-});
-
-// API Endpoints from original code (updated)
-app.get('/api/users', (req, res) => {
-  const db = readDatabase();
-  res.json(db.users);
-});
-
-app.get('/api/users/:id', (req, res) => {
-  const { id } = req.params;
-  const db = readDatabase();
-  const user = db.users.find(u => u.id === id);
-  
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
-  }
-  
-  res.json({
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    bio: user.bio,
-    avatar: user.avatar,
-    createdAt: user.createdAt,
-    isSuspended: user.isSuspended || false
-  });
-});
-
-app.get('/api/notes/public', (req, res) => {
-  const db = readDatabase();
-  const publicNotes = db.notes.filter(note => note.isPublic && !db.users.find(u => u.id === note.userId)?.isSuspended);
-  
-  // Add stats to each note
-  const notesWithStats = publicNotes.map(note => {
-    const views = db.views.filter(v => v.noteId === note.id).length;
-    const likes = db.likes.filter(l => l.noteId === note.id).length;
-    const comments = db.comments.filter(c => c.noteId === note.id).length;
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const users = await User.find({}, 'name email createdAt isSuspended')
+      .sort({ createdAt: -1 });
     
-    return {
-      ...note,
-      views,
-      likes,
-      comments
-    };
-  });
-  
-  res.json(notesWithStats);
-});
-
-app.get('/api/notes/user/:userId', (req, res) => {
-  const { userId } = req.params;
-  const db = readDatabase();
-  const userNotes = db.notes.filter(note => note.userId === userId);
-  
-  // Add stats to each note
-  const notesWithStats = userNotes.map(note => {
-    const views = db.views.filter(v => v.noteId === note.id).length;
-    const likes = db.likes.filter(l => l.noteId === note.id).length;
-    const comments = db.comments.filter(c => c.noteId === note.id).length;
+    // Add notes count for each user
+    const usersWithStats = await Promise.all(users.map(async user => {
+      const notesCount = await Note.countDocuments({ userId: user._id });
+      return {
+        ...user.toObject(),
+        notesCount
+      };
+    }));
     
-    return {
-      ...note,
-      views,
-      likes,
-      comments
-    };
-  });
-  
-  res.json(notesWithStats);
+    res.json(usersWithStats);
+  } catch (error) {
+    console.error('Error getting admin users:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-app.post('/api/notes', upload.single('image'), (req, res) => {
-  const { title, content, userId, isPublic } = req.body;
-  const image = req.file;
-  
-  if (!title || !content || !userId) {
-    return res.status(400).json({ error: 'Title, content, and userId are required' });
+app.put('/api/admin/users/suspend/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { suspend } = req.body;
+    
+    const user = await User.findByIdAndUpdate(
+      userId, 
+      { isSuspended: suspend },
+      { new: true }
+    );
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({ success: true, isSuspended: user.isSuspended });
+  } catch (error) {
+    console.error('Error suspending user:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-
-  const db = readDatabase();
-  const newNote = {
-    id: Date.now().toString(),
-    title,
-    content,
-    userId,
-    isPublic: !!isPublic,
-    image: image ? `/assets/${image.filename}` : null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-
-  db.notes.push(newNote);
-  writeDatabase(db);
-
-  res.status(201).json(newNote);
 });
 
-app.put('/api/notes/:id', upload.single('image'), (req, res) => {
-  const { id } = req.params;
-  const { title, content, isPublic, removeImage } = req.body;
-  const image = req.file;
-
-  const db = readDatabase();
-  const noteIndex = db.notes.findIndex(n => n.id === id);
-
-  if (noteIndex === -1) {
-    return res.status(404).json({ error: 'Note not found' });
+app.delete('/api/admin/notes/:noteId', async (req, res) => {
+  try {
+    const { noteId } = req.params;
+    
+    // Remove note and related data in transaction
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+      await Note.findByIdAndDelete(noteId).session(session);
+      await Comment.deleteMany({ noteId }).session(session);
+      await Like.deleteMany({ noteId }).session(session);
+      await Bookmark.deleteMany({ noteId }).session(session);
+      await View.deleteMany({ noteId }).session(session);
+      
+      await session.commitTransaction();
+      res.json({ success: true });
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  } catch (error) {
+    console.error('Error deleting note:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-
-  const updatedNote = {
-    ...db.notes[noteIndex],
-    title: title || db.notes[noteIndex].title,
-    content: content || db.notes[noteIndex].content,
-    isPublic: isPublic !== undefined ? isPublic : db.notes[noteIndex].isPublic,
-    image: image ? `/assets/${image.filename}` : 
-           removeImage === 'true' ? null : db.notes[noteIndex].image,
-    updatedAt: new Date().toISOString()
-  };
-
-  db.notes[noteIndex] = updatedNote;
-  writeDatabase(db);
-
-  res.json(updatedNote);
 });
 
-app.delete('/api/notes/:id', (req, res) => {
-  const { id } = req.params;
-
-  const db = readDatabase();
-  const noteIndex = db.notes.findIndex(n => n.id === id);
-
-  if (noteIndex === -1) {
-    return res.status(404).json({ error: 'Note not found' });
+// Regular API endpoints
+app.get('/api/users', async (req, res) => {
+  try {
+    const users = await User.find({}, 'name email avatar bio createdAt');
+    res.json(users);
+  } catch (error) {
+    console.error('Error getting users:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-
-  db.notes.splice(noteIndex, 1);
-  
-  // Remove related comments, likes, etc.
-  db.comments = db.comments.filter(c => c.noteId !== id);
-  db.likes = db.likes.filter(l => l.noteId !== id);
-  db.bookmarks = db.bookmarks.filter(b => b.noteId !== id);
-  db.views = db.views.filter(v => v.noteId !== id);
-  
-  writeDatabase(db);
-
-  res.json({ message: 'Note deleted successfully' });
 });
 
-app.post('/api/register', (req, res) => {
-  const { name, email, password, bio } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: 'Name, email, and password are required' });
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id, 'name email bio avatar createdAt isSuspended');
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json(user);
+  } catch (error) {
+    console.error('Error getting user:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-
-  // Validate email format
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    return res.status(400).json({ error: 'Invalid email format' });
-  }
-
-  const db = readDatabase();
-  
-  // Check if email already exists (case insensitive)
-  const emailExists = db.users.some(u => u.email.toLowerCase() === email.toLowerCase());
-  if (emailExists) {
-    return res.status(400).json({ error: 'Email already registered' });
-  }
-
-  // Hash password
-  const hashedPassword = bcrypt.hashSync(password, 10);
-
-  const newUser = {
-    id: Date.now().toString(),
-    name,
-    email: email.toLowerCase(), // Store email in lowercase
-    password: hashedPassword,
-    bio: bio || '',
-    avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=4a6fa5&color=fff`,
-    createdAt: new Date().toISOString(),
-    isSuspended: false
-  };
-
-  db.users.push(newUser);
-  writeDatabase(db);
-
-  // Don't return password hash
-  const { password: _, ...userWithoutPassword } = newUser;
-  res.status(201).json(userWithoutPassword);
 });
 
-app.post('/api/login', (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required' });
+app.get('/api/notes/public', async (req, res) => {
+  try {
+    const publicNotes = await Note.find({ isPublic: true })
+      .populate('userId', 'name avatar')
+      .sort({ createdAt: -1 });
+    
+    res.json(publicNotes);
+  } catch (error) {
+    console.error('Error getting public notes:', error);
+    res.status(500).json({ error: 'Server error' });
   }
-
-  const db = readDatabase();
-  const user = db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
-
-  if (!user || !bcrypt.compareSync(password, user.password)) {
-    return res.status(401).json({ error: 'Invalid email or password' });
-  }
-
-  if (user.isSuspended) {
-    return res.status(403).json({ error: 'Account suspended. Please contact admin.' });
-  }
-
-  // Don't return password hash
-  const { password: _, ...userWithoutPassword } = user;
-  res.json(userWithoutPassword);
 });
 
-app.put('/api/users/:id', upload.single('avatar'), (req, res) => {
-  const { id } = req.params;
-  const { name, bio, removeAvatar } = req.body;
-  const avatar = req.file;
-
-  const db = readDatabase();
-  const userIndex = db.users.findIndex(u => u.id === id);
-
-  if (userIndex === -1) {
-    return res.status(404).json({ error: 'User not found' });
+app.get('/api/notes/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userNotes = await Note.find({ userId })
+      .populate('userId', 'name avatar')
+      .sort({ createdAt: -1 });
+    
+    res.json(userNotes);
+  } catch (error) {
+    console.error('Error getting user notes:', error);
+    res.status(500).json({ error: 'Server error' });
   }
+});
 
-  const updatedUser = {
-    ...db.users[userIndex],
-    name: name || db.users[userIndex].name,
-    bio: bio !== undefined ? bio : db.users[userIndex].bio,
-    avatar: avatar ? `/assets/${avatar.filename}` : 
-           removeAvatar === 'true' ? `https://ui-avatars.com/api/?name=${encodeURIComponent(name || db.users[userIndex].name)}&background=4a6fa5&color=fff` : 
-           db.users[userIndex].avatar
-  };
+app.post('/api/notes', upload.single('image'), async (req, res) => {
+  try {
+    const { title, content, userId, isPublic } = req.body;
+    const image = req.file;
+    
+    if (!title || !content || !userId) {
+      return res.status(400).json({ error: 'Title, content, and userId are required' });
+    }
 
-  db.users[userIndex] = updatedUser;
-  writeDatabase(db);
+    const newNote = new Note({
+      title,
+      content,
+      userId,
+      isPublic: !!isPublic,
+      image: image ? `/assets/${image.filename}` : null
+    });
 
-  // Don't return password hash
-  const { password: _, ...userWithoutPassword } = updatedUser;
-  res.json(userWithoutPassword);
+    await newNote.save();
+    res.status(201).json(newNote);
+  } catch (error) {
+    console.error('Error creating note:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/notes/:id', upload.single('image'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, content, isPublic, removeImage } = req.body;
+    const image = req.file;
+
+    const note = await Note.findById(id);
+
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    if (title) note.title = title;
+    if (content) note.content = content;
+    if (isPublic !== undefined) note.isPublic = isPublic;
+    
+    if (image) {
+      note.image = `/assets/${image.filename}`;
+    } else if (removeImage === 'true') {
+      note.image = null;
+    }
+    
+    note.updatedAt = new Date();
+    await note.save();
+
+    res.json(note);
+  } catch (error) {
+    console.error('Error updating note:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/notes/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Remove note and related data in transaction
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
+    try {
+      await Note.findByIdAndDelete(id).session(session);
+      await Comment.deleteMany({ noteId: id }).session(session);
+      await Like.deleteMany({ noteId: id }).session(session);
+      await Bookmark.deleteMany({ noteId: id }).session(session);
+      await View.deleteMany({ noteId: id }).session(session);
+      
+      await session.commitTransaction();
+      res.json({ message: 'Note deleted successfully' });
+    } catch (error) {
+      await session.abortTransaction();
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  } catch (error) {
+    console.error('Error deleting note:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/register', async (req, res) => {
+  try {
+    const { name, email, password, bio } = req.body;
+    
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email, and password are required' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Check if email already exists
+    const emailExists = await User.exists({ email: email.toLowerCase() });
+    if (emailExists) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    const newUser = new User({
+      name,
+      email: email.toLowerCase(),
+      password,
+      bio: bio || '',
+      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=4a6fa5&color=fff`
+    });
+
+    await newUser.save();
+
+    // Don't return password hash
+    const userResponse = newUser.toObject();
+    delete userResponse.password;
+
+    res.status(201).json(userResponse);
+  } catch (error) {
+    console.error('Error registering user:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    if (!user || !(await user.comparePassword(password))) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    if (user.isSuspended) {
+      return res.status(403).json({ error: 'Account suspended. Please contact admin.' });
+    }
+
+    // Don't return password hash
+    const userResponse = user.toObject();
+    delete userResponse.password;
+
+    res.json(userResponse);
+  } catch (error) {
+    console.error('Error logging in:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/users/:id', upload.single('avatar'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, bio, removeAvatar } = req.body;
+    const avatar = req.file;
+
+    const user = await User.findById(id);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (name) user.name = name;
+    if (bio !== undefined) user.bio = bio;
+    
+    if (avatar) {
+      user.avatar = `/assets/${avatar.filename}`;
+    } else if (removeAvatar === 'true') {
+      user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(name || user.name)}&background=4a6fa5&color=fff`;
+    }
+    
+    await user.save();
+
+    // Don't return password hash
+    const userResponse = user.toObject();
+    delete userResponse.password;
+
+    res.json(userResponse);
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Serve frontend
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // Run server
